@@ -16,17 +16,24 @@ Compile with:
 #include <dirent.h>
 #include <png.h>
 
+#ifndef BUILD_MONOLITHIC
 #define STB_IMAGE_IMPLEMENTATION
+#endif
 #define STBI_ONLY_PNG
 #define STBI_NO_LINEAR
 #include "stb_image.h"
 
+#ifndef BUILD_MONOLITHIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+#endif
 #include "stb_image_write.h"
 
+#ifndef BUILD_MONOLITHIC
 #define QOI_IMPLEMENTATION
+#endif
 #include "qoi.h"
 
+#include "monolithic_examples.h"
 
 
 
@@ -51,7 +58,7 @@ Compile with:
 	#include <windows.h>
 #endif
 
-static uint64_t ns() {
+static uint64_t ns(void) {
 	static uint64_t is_init = 0;
 #if defined(__APPLE__)
 		static mach_timebase_info_data_t info;
@@ -89,6 +96,7 @@ static uint64_t ns() {
 
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
+#undef ERROR
 #define ERROR(...) printf("abort at line " TOSTRING(__LINE__) ": " __VA_ARGS__); printf("\n"); exit(1)
 
 
@@ -139,7 +147,11 @@ void *libpng_encode(void *pixels, int w, int h, int channels, int *out_len) {
 		PNG_FILTER_TYPE_DEFAULT
 	);
 
-	png_bytep row_pointers[h];
+	if (h > 70000) {
+		ERROR("h too large");
+	}
+
+	png_bytep row_pointers[70000 /* h */];
 	for(int y = 0; y < h; y++){
 		row_pointers[y] = ((unsigned char *)pixels + y * w * channels);
 	}
@@ -170,7 +182,7 @@ typedef struct {
 void png_decode_callback(png_structp png, png_bytep data, png_size_t length) {
 	libpng_read_t *read_data = (libpng_read_t*)png_get_io_ptr(png);
 	if (read_data->pos + length > read_data->size) {
-		ERROR("PNG read %ld bytes at pos %d (size: %d)", length, read_data->pos, read_data->size);
+		ERROR("PNG read %zu bytes at pos %d (size: %d)", (size_t)length, read_data->pos, read_data->size);
 	}
 	memcpy(data, read_data->data + read_data->pos, length);
 	read_data->pos += length;
@@ -233,12 +245,21 @@ void *libpng_decode(void *data, int size, int *out_w, int *out_h) {
 	
 	png_read_update_info(png, info);
 
-	unsigned char* out = malloc(w * h * 4);
+	size_t space = w;
+	space *= h * 4;
+	unsigned char* out = malloc(space);
+	if (!out) {
+		ERROR("out of memory allocating %zu bytes: %u * %u * 4", space, w, h);
+	}
 	*out_w = w;
 	*out_h = h;
 	
 	// png_uint_32 rowBytes = png_get_rowbytes(png, info);
-	png_bytep row_pointers[h];
+	if (h > 70000) {
+		ERROR("h too large");
+	}
+
+	png_bytep row_pointers[70000 /* h */ ];
 	for (png_uint_32 row = 0; row < h; row++ ) {
 		row_pointers[row] = (png_bytep)(out + (row * w * 4));
 	}
@@ -346,13 +367,13 @@ void benchmark_print_result(benchmark_result_t res) {
 		res.libs[i].decode_time /= res.count;
 		res.libs[i].size /= res.count;
 		printf(
-			"%s   %8.1f    %8.1f      %8.2f      %8.2f  %8ld   %4.1f%%\n",
+			"%s   %8.1f    %8.1f      %8.2f      %8.2f  %8zd   %4.1f%%\n",
 			lib_names[i],
 			(double)res.libs[i].decode_time/1000000.0,
 			(double)res.libs[i].encode_time/1000000.0,
 			(res.libs[i].decode_time > 0 ? px / ((double)res.libs[i].decode_time/1000.0) : 0),
 			(res.libs[i].encode_time > 0 ? px / ((double)res.libs[i].encode_time/1000.0) : 0),
-			res.libs[i].size/1024,
+			(size_t)res.libs[i].size/1024,
 			((double)res.libs[i].size/(double)res.raw_size) * 100.0
 		);
 	}
@@ -394,12 +415,14 @@ benchmark_result_t benchmark_image(const char *path) {
 
 	void *pixels = (void *)stbi_load(path, &w, &h, NULL, channels);
 	void *encoded_png = fload(path, &encoded_png_size);
-	void *encoded_qoi = qoi_encode(pixels, &(qoi_desc){
-			.width = w,
-			.height = h, 
+	// fix: error C4576: a parenthesized type followed by an initializer list is a non-standard explicit type conversion syntax
+	const qoi_desc desc = {
+		.width = w,
+			.height = h,
 			.channels = channels,
 			.colorspace = QOI_SRGB
-		}, &encoded_qoi_size);
+	};
+	void *encoded_qoi = qoi_encode(pixels, &desc, &encoded_qoi_size);
 
 	if (!pixels || !encoded_qoi || !encoded_png) {
 		ERROR("Error encoding %s", path);
@@ -470,12 +493,14 @@ benchmark_result_t benchmark_image(const char *path) {
 
 		BENCHMARK_FN(opt_nowarmup, opt_runs, res.libs[QOI].encode_time, {
 			int enc_size;
-			void *enc_p = qoi_encode(pixels, &(qoi_desc){
+			// fix: error C4576: a parenthesized type followed by an initializer list is a non-standard explicit type conversion syntax
+			const qoi_desc desc = {
 				.width = w,
-				.height = h, 
+				.height = h,
 				.channels = channels,
 				.colorspace = QOI_SRGB
-			}, &enc_size);
+			};
+			void *enc_p = qoi_encode(pixels, &desc, &enc_size);
 			res.libs[QOI].size = enc_size;
 			free(enc_p);
 		});
@@ -562,7 +587,12 @@ void benchmark_directory(const char *path, benchmark_result_t *grand_total) {
 	}
 }
 
-int main(int argc, char **argv) {
+
+#if defined(BUILD_MONOLITHIC)
+#define main			qoi_benchmark_main
+#endif
+
+int main(int argc, const char **argv) {
 	if (argc < 3) {
 		printf("Usage: qoibench <iterations> <directory> [options]\n");
 		printf("Options:\n");
